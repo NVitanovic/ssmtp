@@ -13,6 +13,10 @@
 #define VERSION "2.64"
 #define _GNU_SOURCE
 
+#include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/param.h>
@@ -48,18 +52,19 @@ bool_t minus_t = False;
 bool_t minus_v = False;
 bool_t override_from = False;
 bool_t rewrite_domain = False;
-bool_t use_tls = False;			/* Use SSL to transfer mail to HUB */
+bool_t use_tls = False;				/* Use SSL to transfer mail to HUB */
 bool_t use_starttls = False;		/* SSL only after STARTTLS (RFC2487) */
-bool_t use_cert = False;		/* Use a certificate to transfer SSL mail */
-bool_t use_oldauth = False;		/* use old AUTH LOGIN username style */
+bool_t use_cert = False;			/* Use a certificate to transfer SSL mail */
+bool_t use_oldauth = False;			/* use old AUTH LOGIN username style */
+bool_t use_custom_uid = False; 		/* enable option -ou to set custom uid */
 
-#define ARPADATE_LENGTH 32		/* Current date in RFC format */
+#define ARPADATE_LENGTH 32						/* Current date in RFC format */
 char arpadate[ARPADATE_LENGTH];
 char *auth_user = (char)NULL;
 char *auth_pass = (char)NULL;
-char *auth_method = (char)NULL;		/* Mechanism for SMTP authentication */
+char *auth_method = (char)NULL;					/* Mechanism for SMTP authentication */
 char *mail_domain = (char)NULL;
-char *from = (char)NULL;		/* Use this as the From: address */
+char *from = (char)NULL;						/* Use this as the From: address */
 char *hostname;
 char *mailhost = "mailhub";
 char *minus_f = (char)NULL;
@@ -69,8 +74,8 @@ char *prog = (char)NULL;
 char *root = NULL;
 char *tls_cert = "/etc/ssl/certs/ssmtp.pem";	/* Default Certificate */
 char *uad = (char)NULL;
-char *config_file = (char)NULL;		/* alternate configuration file */
-
+char *config_file = (char)NULL;					/* alternate configuration file */
+char *custom_uid = (char)NULL;  				/* custom uid that is passed via -ou parameter, which will force that uid if it exist in passwd */
 headers_t headers, *ht;
 
 #ifdef DEBUG
@@ -136,6 +141,50 @@ ssize_t smtp_write(int fd, char *format, ...);
 int smtp_read(int fd, char *response);
 int smtp_read_all(int fd, char *response);
 int smtp_okay(int fd, char *response);
+
+typedef enum {
+    STR2INT_SUCCESS,
+    STR2INT_OVERFLOW,
+    STR2INT_UNDERFLOW,
+    STR2INT_INCONVERTIBLE
+} str2int_errno;
+
+/*
+Convert string s to int out.
+
+@param[out] out The converted int. Cannot be NULL.
+
+@param[in] s Input string to be converted.
+
+    The format is the same as strtol,
+    except that the following are inconvertible:
+
+    - empty string
+    - leading whitespace
+    - any trailing characters that are not part of the number
+
+    Cannot be NULL.
+
+@param[in] base Base to interpret string in. Same range as strtol (2 to 36).
+
+@return Indicates if the operation succeeded, or why it failed.
+*/
+str2int_errno str2int(int *out, char *s, int base) {
+    char *end;
+    if (s[0] == '\0' || isspace((unsigned char) s[0]))
+        return STR2INT_INCONVERTIBLE;
+    errno = 0;
+    long l = strtol(s, &end, base);
+    /* Both checks are needed because INT_MAX == LONG_MAX is possible. */
+    if (l > INT_MAX || (errno == ERANGE && l == LONG_MAX))
+        return STR2INT_OVERFLOW;
+    if (l < INT_MIN || (errno == ERANGE && l == LONG_MIN))
+        return STR2INT_UNDERFLOW;
+    if (*end != '\0')
+        return STR2INT_INCONVERTIBLE;
+    *out = l;
+    return STR2INT_SUCCESS;
+}
 
 /*
 dead_letter() -- Save stdin to ~/dead.letter if possible
@@ -1423,7 +1472,17 @@ int ssmtp(char *argv[])
 	outbytes = 0;
 	ht = &headers;
 
-	uid = getuid();
+	/*check if custom_uid option is present and valid uid is set or fallback to default uid read from getuid*/
+	if(use_custom_uid == False)
+		uid = getuid();
+	else
+	{
+		if(str2int(&i, custom_uid, 10) == STR2INT_SUCCESS)
+			uid = i;
+		else
+			die("Invalid uid specified");
+	}
+	
 	if((pw = getpwuid(uid)) == (struct passwd *)NULL) {
 		die("Could not find password entry for UID %d", uid);
 	}
@@ -2006,6 +2065,20 @@ char **parse_options(int argc, char *argv[])
 
 				/* Set uid */
 				case 'u':
+					use_custom_uid = True;
+					if((!argv[i][(j + 1)]) && argv[(i + 1)]) {
+					custom_uid = strdup(argv[(i + 1)]);
+					if(custom_uid == (char *)NULL) {
+						die("parse_options() -- strdup() failed");
+					}
+					add++;
+					}
+					else {
+						custom_uid = strdup(argv[i]+j+1);
+						if(custom_uid == (char *)NULL) {
+							die("parse_options() -- strdup() failed");
+						}
+					}
 					goto exit;
 
 				/* Set verbose flag */
